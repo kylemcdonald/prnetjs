@@ -1,0 +1,191 @@
+<html>
+<head>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@0.13.5"> </script>
+</head>
+
+<style>
+img, canvas {
+  width: 256px;
+  height: 256px;
+}
+#mask {
+  display: none;
+}
+* {
+  font-family: 'Menlo', monospace;
+  font-size: 11px;
+}
+</style>
+
+<div style="padding-bottom:.5em">
+<b>auto export</b> <a href="index.html">manual port</a>
+</div>
+<div>
+  <img id="face" src="images/faces/dorothy_ashby.jpg"/>
+  <img id="mask" src="images/uv_face_mask.png"/>
+  <canvas id="output_uv"></canvas>
+  <canvas id="output_points"></canvas>
+</div>
+<button onclick="randomImage()">Random Image</button>
+<button onclick="document.getElementById('log').innerHTML=''; runModel()" id="runButton">Run</button>
+<p id="log"></p>
+
+<script>
+function log(msg) {
+  console.log(msg);
+  document.getElementById('log').innerHTML += msg + '<br/>';
+}
+
+log('starting');
+
+const canvas_points = document.querySelector('#output_points');
+var density = 2;
+canvas_points.width = 256*density;
+canvas_points.height = 256*density;
+const ctx_points = canvas_points.getContext('2d');
+
+const canvas_uv = document.querySelector('#output_uv');
+canvas_uv.width = 256;
+canvas_uv.height = 256;
+var ctx_uv = canvas_uv.getContext('2d');
+
+function showArray(array) {
+  var imagedata_uv = ctx_uv.getImageData(0, 0, canvas_uv.width, canvas_uv.height);
+  var wu = canvas_uv.width, hu = canvas_uv.height;
+  ctx_uv.clearRect(0, 0, wu, hu);
+  var i = 0, j = 0;
+  var n = wu * hu * 4;
+  while(i < n) {
+    imagedata_uv.data[i++] = array[j++];
+    imagedata_uv.data[i++] = array[j++];
+    imagedata_uv.data[i++] = array[j++];
+    imagedata_uv.data[i++] = 255;
+  }
+  ctx_uv.putImageData(imagedata_uv, 0, 0);
+
+  var wp = canvas_points.width, hp = canvas_points.height;
+  // ctx_points.clearRect(0, 0, wp, hp);
+  ctx_points.drawImage(document.querySelector('#face'),
+    0, 0, canvas_points.width, canvas_points.height);
+  var imagedata_points = ctx_points.getImageData(0, 0, canvas_points.width, canvas_points.height);
+  n = wp * hp * 4;
+  j = 0;
+  while(j < n) {
+    // var col = j % 24 == 0;
+    // var row = ((j/256)|0) % 8 == 0;
+    // var bright = col && row;
+    var u = array[j++] * density;
+    var v = array[j++] * density;
+    var z = array[j++];
+    i = (v|0) * wp + (u|0);
+    i *= 4;
+    imagedata_points.data[i++] = u;
+    imagedata_points.data[i++] = v;
+    imagedata_points.data[i++] = z;
+    imagedata_points.data[i++] = 255;
+  }
+  ctx_points.putImageData(imagedata_points, 0, 0);
+}
+
+function t(name, func) {
+  tf.time(() => func()).then(val => {
+    for(key in val) {
+      val[key] = val[key].toFixed(2);
+    }
+    val['name'] = name;
+    log(JSON.stringify(val));
+  });
+}
+
+var lastTime;
+function start() {
+  lastTime = performance.now();
+}
+
+function check(name, tensor) {
+  if(typeof(tensor) !== 'undefined') {
+    tensor.dataSync();
+  }
+  const curTime = performance.now();
+  const diff = curTime - lastTime; 
+  log(name + ': ' + Math.round(diff) + 'ms');
+  lastTime = curTime;
+  return diff;
+}
+
+async function loadModel() {
+  start();
+  log('loading model...');
+  const MODEL_URL = 'output-0.6.5-quantized/tensorflowjs_model.pb';
+  const WEIGHTS_URL = 'output-0.6.5-quantized/weights_manifest.json';
+  const model = await tf.loadFrozenModel(MODEL_URL, WEIGHTS_URL);
+  return model;
+}
+
+async function runModel() {
+  log('running model');
+
+  const scale = tf.scalar(255);
+
+  start();
+  var mask = tf.fromPixels(document.getElementById('mask'));
+  mask = mask.mean(2).expandDims(2); // convert to grayscale
+  mask = mask.asType('float32').div(scale); // convert to float
+
+  var x = tf.fromPixels(document.getElementById('face'));
+  x = x.expandDims(); // make a batch of one
+  x = x.asType('float32').div(scale); // convert to float 0-1
+  check('preprocess', x);
+
+  const size = 16;
+  var modelStart = performance.now();
+  x = model.execute({Placeholder: x});
+  var modelEnd = performance.now();
+
+  x = x.mul(scale).mul(tf.scalar(1.1)); // 1.1 is essential
+  // x = x.add(tf.scalar(10)); // ? closer, but unclear why this is needed
+  x = x.mul(mask);
+
+  // start();
+  // const singlePixel = x.slice([0,0,0,0], [1,1,1,1]).dataSync();
+  // check('x.slice([0,0,0,0], [1,1,1,1]).dataSync()');
+
+  start();
+  const data = x.dataSync();
+  check('x.dataSync()');
+  window.result = x;
+  showArray(data);
+}
+
+function randomImage() {
+  var images = [
+    'alice_coltrane.jpg',
+    'arvo_part.jpg',
+    'bjork.jpg',
+    'charanjit_sing.jpg',
+    'connie_converse.jpg',
+    'dear_nora.jpg',
+    'dj_krush.jpg',
+    'dorothy_ashby.jpg',
+    'mc_ride.jpg'
+  ];
+  var i = (Math.random() * images.length)|0;
+  var fn = images[i];
+  var img = document.querySelector('#face');
+  var cur_fn = img.src.split('/').pop();
+  console.log(cur_fn + ', ' + fn);
+  if(cur_fn == fn) {
+    randomImage();
+  } else {
+    img.src = 'images/faces/' + fn;
+  }
+}
+
+loadModel().then((model) => {
+  window.model = model;
+  runModel();
+})
+</script>
+<body>
+</body>
+</html>

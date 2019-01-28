@@ -1,0 +1,368 @@
+<html>
+<head>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@0.13.5"> </script>
+</head>
+
+<style>
+img, canvas {
+  width: 256px;
+  height: 256px;
+}
+#mask {
+  display: none;
+}
+* {
+  font-family: 'Menlo', monospace;
+  font-size: 11px;
+}
+</style>
+
+<div style="padding-bottom:.5em">
+<a href="auto-export.html">auto export</a> <b>manual port</b>
+</div>
+<div>
+  <img id="face" src="images/faces/dorothy_ashby.jpg"/>
+  <img id="mask" src="images/uv_face_mask.png"/>
+  <canvas id="output_uv"></canvas>
+  <canvas id="output_points"></canvas>
+</div>
+<button onclick="randomImage()">Random Image</button>
+<button onclick="document.getElementById('log').innerHTML=''; runModel()" id="runButton">Run</button>
+<p id="log"></p>
+
+<script>
+// function fit_line(xy) {
+//   var xyt = tf.tensor(xy);
+//   var mean = xyt.mean(0);
+//   var c = xyt.sub(mean);
+//   var cx = c.slice([0,0],[-1,1]);
+//   var cy = c.slice([0,1],[-1,1]);
+//   var m = cx.mul(cy).sum().div(cx.square().sum());
+//   var X = mean.slice([0],[1]);
+//   var Y = mean.slice([1],[1]);
+//   var b = Y.sub(m.mul(X));
+//   var x = xyt.slice([0,0],[-1,1]);
+//   var y = xyt.slice([0,1],[-1,1]);
+//   var predicted = x.mul(m).add(b);
+//   var ss_res = y.sub(predicted).square().sum();
+//   var ss_tot = y.sub(Y).square().sum();
+//   var R2 = tf.tensor(1).sub(ss_res.div(ss_tot));
+//   return [m.dataSync()[0], b.dataSync()[0], R2.dataSync()[0]];
+// }
+
+// function removeMinMax(times) {
+//   var min, max;
+//   times.forEach(e => {
+//     if(!min || e[1] < min) min = e[1];
+//     if(!max || e[1] > max) max = e[1];
+//   })
+//   var result = [];
+//   times.forEach(e => {
+//     if(e[1] != min & e[1] != max) result.push(e);
+//   })
+//   return result;
+// }
+
+// var side = 256;
+// var filterSize = 4;
+// var stride = 1;
+// var chMul = 1;
+// var inDepth = 16;
+// var outDepth = 16;
+// var depthwiseFilter = tf.randomUniform([filterSize, filterSize, inDepth, chMul]); // 256
+// var pointwiseFilter = tf.randomUniform([1, 1, inDepth * chMul, outDepth]); // 256
+// var standardFilter = tf.randomUniform([filterSize, filterSize, inDepth, outDepth]); // 4096
+// var n = 10;
+
+// function timing(name, f) {
+//   var times = [];
+//   for(var i = 0; i < n; i++) {
+//     var y = tf.randomUniform([1, side, side, inDepth]);
+//     var startTime = performance.now();
+//     var n_layers = i + 1;
+//     var output = f(y);
+//     for (var j = 0; j < n_layers; j++) output = output.add(f(y));
+//     output.dataSync();
+//     var duration = performance.now() - startTime;
+//     if(i > 1) { // ignore initial compilation & upload
+//       times.push([n_layers, duration]);
+//     }
+//     console.log(name + ' n_layers=' + n_layers + ', duration=' + duration.toFixed(2) + 'ms');
+//   }
+//   times = removeMinMax(times);
+//   var line = fit_line(times);
+//   log(name + ': ' + line[0].toFixed(1) + 'ms per layer + ' + line[1].toFixed(1) + 'ms overhead, R^2=' + line[2].toFixed(3));
+// }
+
+// // timing('pass through', data => data);
+// // timing('sigmoid', data => tf.sigmoid(data));
+// // timing('relu', data => tf.relu(data));
+// [0, 'valid', 'same'].forEach( pad => {
+//   timing('separableConv2d ' + pad, data => tf.separableConv2d(data, depthwiseFilter, pointwiseFilter, stride, pad))
+//   // timing('conv2d ' + pad, data => tf.conv2d(data, standardFilter, stride, pad));
+// })
+
+function log(msg) {
+  console.log(msg);
+  document.getElementById('log').innerHTML += msg + '<br/>';
+}
+
+log('starting');
+
+const canvas_points = document.querySelector('#output_points');
+var density = 2;
+canvas_points.width = 256*density;
+canvas_points.height = 256*density;
+const ctx_points = canvas_points.getContext('2d');
+
+const canvas_uv = document.querySelector('#output_uv');
+canvas_uv.width = 256;
+canvas_uv.height = 256;
+var ctx_uv = canvas_uv.getContext('2d');
+
+function showArray(array) {
+  var imagedata_uv = ctx_uv.getImageData(0, 0, canvas_uv.width, canvas_uv.height);
+  var wu = canvas_uv.width, hu = canvas_uv.height;
+  ctx_uv.clearRect(0, 0, wu, hu);
+  var i = 0, j = 0;
+  var n = wu * hu * 4;
+  while(i < n) {
+    imagedata_uv.data[i++] = array[j++];
+    imagedata_uv.data[i++] = array[j++];
+    imagedata_uv.data[i++] = array[j++];
+    imagedata_uv.data[i++] = 255;
+  }
+  ctx_uv.putImageData(imagedata_uv, 0, 0);
+
+  var wp = canvas_points.width, hp = canvas_points.height;
+  // ctx_points.clearRect(0, 0, wp, hp);
+  ctx_points.drawImage(document.querySelector('#face'),
+    0, 0, canvas_points.width, canvas_points.height);
+  var imagedata_points = ctx_points.getImageData(0, 0, canvas_points.width, canvas_points.height);
+  n = wp * hp * 4;
+
+  j = 0;
+  while(j < n) {
+    // var col = j % 24 == 0;
+    // var row = ((j/256)|0) % 8 == 0;
+    // var bright = col && row;
+    var u = array[j++] * density;
+    var v = array[j++] * density;
+    var z = array[j++];
+    i = (v|0) * wp + (u|0);
+    i *= 4;
+    imagedata_points.data[i++] = u;
+    imagedata_points.data[i++] = v;
+    imagedata_points.data[i++] = z;
+    imagedata_points.data[i++] = 255;
+  }
+  ctx_points.putImageData(imagedata_points, 0, 0);
+}
+
+const pad = 'same';
+
+function bn(input, vars, name) {
+  return tf.batchNormalization(
+    input,
+    vars[name + '/BatchNorm/moving_mean'],
+    vars[name + '/BatchNorm/moving_variance'],
+    0.001,
+    vars[name + '/BatchNorm/gamma'],
+    vars[name + '/BatchNorm/beta']
+  );
+}
+
+// hack to fix https://github.com/tensorflow/tfjs/issues/261#issuecomment-390463379
+function conv2d(input, weights, stride, pad) {
+  // return tf.conv2d(input, weights, stride, pad);
+  var output = tf.conv2d(input, weights, 1, pad);
+  if (stride == 1) {
+    return output;
+  }
+  return tf.stridedSlice(output, [0,0,0,0], output.shape, [1,stride,stride,1]);
+}
+
+// https://www.tensorflow.org/api_docs/python/tf/contrib/layers/conv2d
+function resBlock(name, vars, x, num_outputs, stride) {
+  var shortcut = x;
+  if(stride != 1 || x.shape[3] != num_outputs) {
+    shortcut = conv2d(shortcut, vars[name + '/shortcut/weights'], stride, pad);
+  }
+
+  const rb_c0 = tf.relu(bn(
+    tf.conv2d(x, vars[name + '/Conv/weights'], 1, pad),
+    vars, name + '/Conv'));
+  const rb_c1 = tf.relu(bn(
+    conv2d(rb_c0, vars[name + '/Conv_1/weights'], stride, pad),
+    vars, name + '/Conv_1'));
+  const rb_c2 = tf.conv2d(rb_c1, vars[name + '/Conv_2/weights'], 1, pad);
+  const output = tf.relu(bn(
+    shortcut.add(rb_c2),
+    vars, name));
+
+  // check(name, output);
+
+  return output;
+}
+
+// based on https://www.tensorflow.org/api_docs/python/tf/contrib/layers/conv2d_transpose
+function conv2dTranspose(name, vars, x, num_outputs, stride, activation_fn) {
+  if (typeof(activation_fn) === 'undefined') {
+    activation_fn = tf.relu;
+  }
+
+  var output_shape = [
+    x.shape[0],
+    x.shape[1] * stride,
+    x.shape[2] * stride,
+    num_outputs
+  ];
+
+  var output = activation_fn(bn(
+    tf.conv2dTranspose(x, vars[name + '/weights'], output_shape, stride, pad),
+    vars, name));
+
+  // check(name, output);
+
+  return output;
+}
+
+function t(name, func) {
+  tf.time(() => func()).then(val => {
+    for(key in val) {
+      val[key] = val[key].toFixed(2);
+    }
+    val['name'] = name;
+    log(JSON.stringify(val));
+  });
+}
+
+var lastTime;
+function start() {
+  lastTime = performance.now();
+}
+
+function check(name, tensor) {
+  if(typeof(tensor) !== 'undefined') {
+    tensor.dataSync();
+  }
+  const curTime = performance.now();
+  const diff = curTime - lastTime; 
+  log(name + ': ' + Math.round(diff) + 'ms');
+  lastTime = curTime;
+  return diff;
+}
+
+async function loadWeightMap() {
+  start();
+  log('loading manifest...');
+  const dir = 'output-0.6.5-quantized/';
+  const weights_manifest_url = dir + 'weights_manifest-simple.json';
+  const manifest = await fetch(weights_manifest_url);
+  const weightManifest = await manifest.json();
+  check('loaded manifest');
+  log('loading weightMap...');
+  const weightMap = await tf.io.loadWeights(weightManifest, dir);
+  check('loaded weightMap');
+  return weightMap;
+}
+
+async function runModel() {
+  log('running model');
+
+  const scale = tf.scalar(255);
+
+  start();
+  var mask = tf.fromPixels(document.getElementById('mask'));
+  mask = mask.mean(2).expandDims(2); // convert to grayscale
+  mask = mask.asType('float32').div(scale); // convert to float
+
+  var x = tf.fromPixels(document.getElementById('face'));
+  x = x.expandDims(); // make a batch of one
+  x = x.asType('float32').div(scale); // convert to float 0-1
+  check('preprocess', x);
+
+  const size = 16;
+  var modelStart = performance.now();
+  x = tf.conv2d(x, vars['Conv/weights'], 1, pad);
+  // check('initial conv', x)
+  x = tf.relu(bn(x, vars, 'Conv'))
+  // check('initial bn + relu', x)
+  x = resBlock('resBlock', vars, x, size * 2, 2)
+  x = resBlock('resBlock_1', vars, x, size * 2, 1) // 128 x 128 x 32
+  x = resBlock('resBlock_2', vars, x, size * 4, 2) // 64 x 64 x 64
+  x = resBlock('resBlock_3', vars, x, size * 4, 1) // 64 x 64 x 64
+  x = resBlock('resBlock_4', vars, x, size * 8, 2) // 32 x 32 x 128
+  x = resBlock('resBlock_5', vars, x, size * 8, 1) // 32 x 32 x 128
+  x = resBlock('resBlock_6', vars, x, size * 16, 2) // 16 x 16 x 256
+  x = resBlock('resBlock_7', vars, x, size * 16, 1) // 16 x 16 x 256
+  x = resBlock('resBlock_8', vars, x, size * 32, 2) // 8 x 8 x 512
+  x = resBlock('resBlock_9', vars, x, size * 32, 1) // 8 x 8 x 512
+
+  x = conv2dTranspose('Conv2d_transpose', vars, x, size * 32, 1) // 8 x 8 x 512 
+  x = conv2dTranspose('Conv2d_transpose_1', vars, x, size * 16, 2) // 16 x 16 x 256 
+  x = conv2dTranspose('Conv2d_transpose_2', vars, x, size * 16, 1) // 16 x 16 x 256 
+  x = conv2dTranspose('Conv2d_transpose_3', vars, x, size * 16, 1) // 16 x 16 x 256 
+  x = conv2dTranspose('Conv2d_transpose_4', vars, x, size * 8, 2) // 32 x 32 x 128 
+  x = conv2dTranspose('Conv2d_transpose_5', vars, x, size * 8, 1) // 32 x 32 x 128 
+  x = conv2dTranspose('Conv2d_transpose_6', vars, x, size * 8, 1) // 32 x 32 x 128 
+  x = conv2dTranspose('Conv2d_transpose_7', vars, x, size * 4, 2) // 64 x 64 x 64 
+  x = conv2dTranspose('Conv2d_transpose_8', vars, x, size * 4, 1) // 64 x 64 x 64 
+  x = conv2dTranspose('Conv2d_transpose_9', vars, x, size * 4, 1) // 64 x 64 x 64 
+  x = conv2dTranspose('Conv2d_transpose_10', vars, x, size * 2, 2) // 128 x 128 x 32
+  x = conv2dTranspose('Conv2d_transpose_11', vars, x, size * 2, 1) // 128 x 128 x 32
+  x = conv2dTranspose('Conv2d_transpose_12', vars, x, size, 2) // 256 x 256 x 16
+  x = conv2dTranspose('Conv2d_transpose_13', vars, x, size, 1) // 256 x 256 x 16
+  x = conv2dTranspose('Conv2d_transpose_14', vars, x, 3, 1) // 256 x 256 x 3
+  x = conv2dTranspose('Conv2d_transpose_15', vars, x, 3, 1) // 256 x 256 x 3
+  x = conv2dTranspose('Conv2d_transpose_16', vars, x, 3, 1, tf.sigmoid) // 256 x 256 x 3
+  var modelEnd = performance.now();
+  // log('entire model: ' + Math.round(modelEnd-modelStart) + 'ms');
+  // check('model()');
+
+  x = x.mul(scale).mul(tf.scalar(1.1)); // 1.1 is essential
+  x = x.mul(mask);
+
+  // start();
+  // const singlePixel = x.slice([0,0,0,0], [1,1,1,1]).dataSync();
+  // check('x.slice([0,0,0,0], [1,1,1,1]).dataSync()');
+
+  start();
+  const data = x.dataSync();
+  check('x.dataSync()');
+  window.result = x;
+  showArray(data);
+}
+
+function randomImage() {
+  var images = [
+    'alice_coltrane.jpg',
+    'arvo_part.jpg',
+    'bjork.jpg',
+    'charanjit_sing.jpg',
+    'connie_converse.jpg',
+    'dear_nora.jpg',
+    'dj_krush.jpg',
+    'dorothy_ashby.jpg',
+    'mc_ride.jpg'
+  ];
+  var i = (Math.random() * images.length)|0;
+  var fn = images[i];
+  var img = document.querySelector('#face');
+  var cur_fn = img.src.split('/').pop();
+  console.log(cur_fn + ', ' + fn);
+  if(cur_fn == fn) {
+    randomImage();
+  } else {
+    img.src = 'images/faces/' + fn;
+  }
+}
+
+loadWeightMap().then((weightMap) => {
+  window.vars = weightMap;
+  runModel();
+})
+</script>
+<body>
+</body>
+</html>
