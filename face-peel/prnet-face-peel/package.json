@@ -1,0 +1,17 @@
+{
+  "name": "prnet-face-peel",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "@tensorflow/tfjs": "^0.14.2",
+    "typescript": "^3.3.0-dev.20190126"
+  },
+  "scripts": {
+    "dev": "(http-server -p 8181 --cors &) && parcel index.html"
+  },
+  "devDependencies": {
+    "http-server": "^0.11.1",
+    "parcel": "^1.11.0"
+  }
+}
